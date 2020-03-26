@@ -6,4 +6,5 @@ displays a clock with a selectable background:
   - plasma
   - TPM2.NET (for external generator such as Jinx!)
   
-  
+  ![Clock](/images/clock.gif )
+
