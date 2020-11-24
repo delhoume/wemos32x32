@@ -1,8 +1,0 @@
-gifsicle -e -U input.gif
-
-magick convert -append input.gif.* background.bmp
-
-// convert bmp to 8 bits with palette
-
-// generate individual bmps
-magick convert -crop 32x32 background.bmp background%02d.bmp
