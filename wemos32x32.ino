@@ -14,20 +14,23 @@
 #include <Ticker.h>
 #include <Timezone.h>
 #include <ArduinoOTA.h>
+
+#if defined(USEFS)
 //#include <FS.h>
 #include <LittleFS.h>
+#define FILESYSTEM LittleFS
+//#define FILESYSTEM SPIFFS
+#endif
 
 #include <WiFiManager.h>
 
 #define LOCK_VERSION       2
-#include <qrcode.h>
+//#include <qrcode.h>
 
 #include "AnimatedGIF.h"
 
 AnimatedGIF gif;
 
-#define FILESYSTEM LittleFS
-//#define FILESYSTEM SPIFFS
 
 TimeChangeRule CEST = {"CEST", Last, Sun, Mar, 2, 120};     // Central European Summer Time
 TimeChangeRule CET = {"CET ", Last, Sun, Oct, 3, 60};       // Central European Standard Time
@@ -56,7 +59,7 @@ Ticker display_ticker;
 PxMATRIX display(WIDTH, HEIGHT, P_LAT, P_OE, P_A, P_B, P_C, P_D);
 //PxMATRIX display(WIDTH, HEIGHT, P_LAT, P_OE, P_A, P_B, P_C, P_D, P_E);
 
-uint8_t display_draw_time=50; //10-50 is usually fine
+uint8_t display_draw_time=30; //10-50 is usually fine
 float isrDelay = 0.002;
 
 void display_updater() {
@@ -66,6 +69,7 @@ void display_updater() {
 #define ACCESS_POINT "wemos32x32"
 
 void configModeCallback (WiFiManager *myWiFiManager) {
+  #if 0
   // generate QRCode and display it
   QRCode qrcode;
   uint8_t qrcodeBytes[qrcode_getBufferSize(LOCK_VERSION)];
@@ -81,6 +85,7 @@ void configModeCallback (WiFiManager *myWiFiManager) {
     }
   }
   display.showBuffer();
+  #endif
 }
 
 unsigned int NTP_PORT = 2390;      // local port to listen for UDP packets
@@ -161,6 +166,7 @@ void initOTA() {
 
 ESP8266WebServer webServer(80);       // Create a webserver object that listens for HTTP request on port 80
 
+#if defined(USEFS)
 String fileList() {
       String str = "";
   Dir dir = FILESYSTEM.openDir("/");
@@ -172,6 +178,7 @@ String fileList() {
   }
   return str;
 }
+#endif
 
 void sendOk(String text = "Ok") {
   webServer.send(200, "text/plain", text);
@@ -179,7 +186,7 @@ void sendOk(String text = "Ok") {
 
 unsigned long lastFrameTime = 0;
 
-int backgroundMode = 1; // plasma
+int backgroundMode = 5; // fire
 int timeMode = 1;
 unsigned long animLength = 20; // play each gif for 20 seconds
 
@@ -191,7 +198,9 @@ uint16_t myGREY = display.color565(16, 16, 16);
 
 void setup() {
   Serial.begin(115200);
+#if defined(USEFS)
   FILESYSTEM.begin();
+#endif
   display.begin(16);
   gif.begin(LITTLE_ENDIAN_PIXELS);
  display.setFastUpdate(true);
@@ -231,8 +240,10 @@ void setup() {
       timeMode = mode.toInt();
       sendOk();
     });
+    #if defined(USEFS)
     webServer.on("/format", HTTP_GET, []() { boolean ret = FILESYSTEM.format(); sendOk(ret ? "Success" : "Failure"); });
     webServer.on("/list", HTTP_GET, []() { sendOk(fileList()); });
+    #endif
     webServer.begin();
     display.setFont();
     display.setCursor(0, 0);
@@ -331,7 +342,7 @@ uint32_t  LoopDelayMS = TARGET_FRAME_TIME;
 uint32_t  LastLoop = millis() - LoopDelayMS;
 
 void backgroundSwirl() {
-  if (abs(millis() - LastLoop) >= LoopDelayMS) {
+  if ((millis() - LastLoop) >= LoopDelayMS) {
     LastLoop = millis();
     uint8_t blurAmount = beatsin8(2,10,255);
     blur2d( colorsBACK, WIDTH, HEIGHT, blurAmount);
@@ -355,14 +366,16 @@ void backgroundSwirl() {
 }
 
 void backgroundPlasma2() {
-   if (abs(millis() - LastLoop) >= LoopDelayMS) {
+   if ((millis() - LastLoop) >= LoopDelayMS) {
     LastLoop = millis();
    // Fill background with dim plasma
     for (int16_t y = 0; y < HEIGHT; y++) {
      for (int16_t x = 0; x < WIDTH; x++) {
         yield(); // secure time for the WiFi stack of ESP8266
         int16_t r = sin16(PlasmaTime) / 256;
-        int16_t h = sin16(x * r * PLASMA_X_FACTOR + PlasmaTime) + cos16(y * (-r) * PLASMA_Y_FACTOR + PlasmaTime) + sin16(y * x * (cos16(-PlasmaTime) / 256) / 2);
+        int16_t h = sin16(x * r * PLASMA_X_FACTOR + PlasmaTime) + 
+                cos16(y * (-r) * PLASMA_Y_FACTOR + PlasmaTime) +
+                sin16(y * x * (cos16(-PlasmaTime) / 256) / 2);
         colorsBACK[XY(x, y)] = CHSV((uint8_t)((h / 256) + 128), 200, 200);
       }
     }
@@ -373,20 +386,168 @@ void backgroundPlasma2() {
   }
 }
 
+const int rows = HEIGHT;
+const int cols = WIDTH;
+/* Flare constants */
+const uint8_t flarerows = 4;    /* number of rows (from bottom) allowed to flare */
+const uint8_t maxflare = 2;     /* max number of simultaneous flares */
+const uint8_t flarechance = 25; /* chance (%) of a new flare (if there's room) */
+const uint8_t flaredecay = 18;  /* decay rate of flare radiation; 14 is good */
+
+/* This is the map of colors from coolest (black) to hottest. Want blue flames? Go for it! */
+const uint32_t colors[] = {
+  0x000000,
+  0x000000,
+  0x100000,
+  0x200000,
+  0x300000,
+  0x400000,
+  0x600000,
+  0x700000,
+  0x800000,
+  0x900000,
+  0xA00000,
+  0xB00000,
+  0xC02000,
+  0xC02000,
+  0xC03000,
+  0xC03000,
+  0xC04000,
+  0xC04000,
+  0xC05000,
+  0xC06000,
+  0xC07000,
+  0xC08000,
+  0xC08000,
+  0xC08000,
+  0x807080,
+  0x807080,
+  0x807080
+};
+const uint8_t NCOLORS = (sizeof(colors)/sizeof(colors[0]));
+
+uint8_t pix[rows][cols];
+uint8_t nflare = 0;
+uint32_t flare[maxflare];
+
+uint32_t isqrt(uint32_t n) {
+  if ( n < 2 ) return n;
+  uint32_t smallCandidate = isqrt(n >> 2) << 1;
+  uint32_t largeCandidate = smallCandidate + 1;
+  return (largeCandidate*largeCandidate > n) ? smallCandidate : largeCandidate;
+}
+
+// Set pixels to intensity around flare
+void glow( int x, int y, int z ) {
+  int b = z * 10 / flaredecay + 1;
+  for ( int i=(y-b); i<(y+b); ++i ) {
+    for ( int j=(x-b); j<(x+b); ++j ) {
+      if ( i >=0 && j >= 0 && i < rows && j < cols ) {
+        int d = ( flaredecay * isqrt((x-j)*(x-j) + (y-i)*(y-i)) + 5 ) / 10;
+        uint8_t n = 0;
+        if ( z > d ) n = z - d;
+        if ( n > pix[i][j] ) { // can only get brighter
+          pix[i][j] = n;
+        }
+      }
+    }
+  }
+}
+
+void newflare() {
+  if ( nflare < maxflare && random(1,101) <= flarechance ) {
+    int x = random(0, cols);
+    int y = random(0, flarerows);
+    int z = NCOLORS - 1;
+    flare[nflare++] = (z<<16) | (y<<8) | (x&0xff);
+    glow( x, y, z );
+  }
+}
+
+/** make_fire() animates the fire display. It should be called from the
+ *  loop periodically (at least as often as is required to maintain the
+ *  configured refresh rate). Better to call it too often than not enough.
+ *  It will not refresh faster than the configured rate. But if you don't
+ *  call it frequently enough, the refresh rate may be lower than
+ *  configured.
+ */
+//unsigned long t = 0; /* keep time */
+void backgroundFire() {
+  uint16_t i, j;
+//  if ( t > millis() ) return;
+//  t = millis() + (1000 / FPS);
+
+  // First, move all existing heat points up the display and fade
+  for ( i=rows-1; i>0; --i ) {
+    yield();
+    for ( j=0; j<cols; ++j ) {
+      uint8_t n = 0;
+      if ( pix[i-1][j] > 0 )
+        n = pix[i-1][j] - 1;
+      pix[i][j] = n;
+    }
+  }
+
+  // Heat the bottom row
+  for ( j=0; j<cols; ++j ) {
+    i = pix[0][j];
+    if ( i > 0 ) {
+      pix[0][j] = random(NCOLORS-10, NCOLORS-2);
+    }
+  }
+
+  // flare
+  for ( i=0; i<nflare; ++i ) {
+    int x = flare[i] & 0xff;
+    int y = (flare[i] >> 8) & 0xff;
+    int z = (flare[i] >> 16) & 0xff;
+    glow( x, y, z );
+    if ( z > 1 ) {
+      flare[i] = (flare[i] & 0xffff) | ((z-1)<<16);
+    } else {
+      // This flare is out
+      for ( int j=i+1; j<nflare; ++j ) {
+        flare[j-1] = flare[j];
+      }
+      --nflare;
+    }
+    yield();
+  }
+  newflare();
+
+  // Set and draw
+  for ( i=0; i<rows; ++i ) {
+    for ( j=0; j<cols; ++j ) {
+      colorsBACK[XY(j,rows - i - 1)] = colors[pix[i][j]];
+    }
+  }
+ }
+ 
+
+#if defined(USEFS)
 // Functions to access a file on the SD card
 fs::File myfile;
+#endif
 
 void* gifOpen(char *filename, int32_t *size) {
+#if defined(USEFS) 
   myfile = FILESYSTEM.open(filename, "r");
   *size = myfile.size();
   return &myfile;
+#else
+   *size = 0;
+   return 0;
+#endif
 }
 
 void gifClose(void *handle) {
+#if defined(USEFS) 
   if (myfile) myfile.close();
+#endif  
 }
 
 int32_t gifRead(GIFFILE *pFile, uint8_t *pBuf, int32_t iLen) {
+#if defined(USEFS) 
     int32_t iBytesRead;
     iBytesRead = iLen;
     // Note: If you read a file all the way to the last byte, seek() stops working
@@ -397,12 +558,19 @@ int32_t gifRead(GIFFILE *pFile, uint8_t *pBuf, int32_t iLen) {
     iBytesRead = (int32_t)myfile.read(pBuf, iBytesRead);
     pFile->iPos = myfile.position();
     return iBytesRead;
+ #else
+  return 0;
+ #endif
 } 
 
 int32_t gifSeek(GIFFILE *pFile, int32_t iPosition) { 
+#if defined(USEFS) 
   myfile.seek(iPosition);
   pFile->iPos = (int32_t)myfile.position();
    return pFile->iPos;
+#else
+    return 0;
+#endif
 }
 
 static void GIFDraw(int x, int y, int w, int h, uint16_t* lBuf) {
@@ -498,12 +666,14 @@ void loadNewImage(const char* url) {
       if (client.GET() > 0) {
         int len = client.getSize();
 //        Serial.printf("size: %d\n", len);
-        uint8_t buff[256] = { 0 };       
+        uint8_t buff[64] = { 0 }; 
+#if defined(USEFS)      
         File file = FILESYSTEM.open("/image.gif", "w");
         if (!file) {
           Serial.println("There was an error opening the file for writing");
           return;
         } 
+#endif
         while (client.connected() && (len > 0 || len == -1)) {
           // read up to 128 byte
           int c = wclient.readBytes(buff, std::min((size_t)len, sizeof(buff))); 
@@ -511,14 +681,17 @@ void loadNewImage(const char* url) {
           if (!c) {
  //           Serial.println("read timeout");
           }
+#if defined(USEFS)
           // write it to File
           file.write(buff, c);
-
+#endif
           if (len > 0) {
             len -= c;
           }  
         }
+#if defined(USEFS)
         file.close();
+#endif
       }  
     }
     client.end();
@@ -576,6 +749,13 @@ void loop() {
        case 4: // uniform color
        fill_solid(colorsBACK, NUM_LEDS, CRGB::HotPink);
         displayFastLED(colorsBACK);
+        break;
+        
+        case 5: // fire
+        backgroundFire();
+         displayFastLED(colorsBACK);
+        break;
+        
         default:
          break;
       }
@@ -583,5 +763,5 @@ void loop() {
    if (timeMode == 1) 
       displayTime();
     display.showBuffer();
-    delay(20);
+   delay(1);
 }
