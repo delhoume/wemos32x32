@@ -186,7 +186,7 @@ void sendOk(String text = "Ok") {
 
 unsigned long lastFrameTime = 0;
 
-int backgroundMode = 5; // fire
+int backgroundMode = 1; // fire
 int timeMode = 1;
 unsigned long animLength = 20; // play each gif for 20 seconds
 
@@ -328,6 +328,17 @@ void displayTime() {
     printCenter(buffer, 14);
    sprintf(buffer, "%.2d", minute(local));     
     printCenter(buffer, 30);
+}
+
+void setAutomaticBrightness() {
+  int br = 254;
+  time_t utc = now();
+    time_t local = CE.toLocal(utc, &tcr);
+    int h = hour(local);
+    if ((h >= 22) || (h <= 7)) {
+      br = 128;
+    }
+    display.setBrightness(br);
 }
 
 
@@ -726,6 +737,7 @@ void backgroundGIF() {
 void loop() {
    ArduinoOTA.handle();
    webServer.handleClient();
+   setAutomaticBrightness();
    switch (backgroundMode) {
     case 0: // blank
       display.clearDisplay(); 
