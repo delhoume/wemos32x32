@@ -3,24 +3,16 @@
 #include <ESP8266HTTPClient.h>
 #include <WiFiUdp.h>
 #include <FastLED.h>
+
 #define double_buffer
-// saves A  LOT of memory ! (default are 64... and there are two buffers with 3 byte / pixel
-#define PxMATRIX_MAX_HEIGHT 32
-#define PxMATRIX_MAX_WIDTH 32
+#define PxMATRIX_COLOR_DEPTH 4
 #include <PxMatrix.h>
-//#include <Fonts/FreeSansBold9pt7b.h>
+
 #include "IBMPlexBold10pt7b.h"
 
 #include <Ticker.h>
 #include <Timezone.h>
 #include <ArduinoOTA.h>
-
-#if defined(USEFS)
-//#include <FS.h>
-#include <LittleFS.h>
-#define FILESYSTEM LittleFS
-//#define FILESYSTEM SPIFFS
-#endif
 
 #include <WiFiManager.h>
 
@@ -30,7 +22,6 @@
 #include "AnimatedGIF.h"
 
 AnimatedGIF gif;
-
 
 TimeChangeRule CEST = {"CEST", Last, Sun, Mar, 2, 120};     // Central European Summer Time
 TimeChangeRule CET = {"CET ", Last, Sun, Oct, 3, 60};       // Central European Standard Time
@@ -49,18 +40,13 @@ TimeChangeRule *tcr;
 
 #define WIDTH 32
 #define HEIGHT 32
-#define NUM_LEDS (WIDTH * HEIGHT)
-#define BORDER_WIDTH 2
-
-CRGB colorsBACK[NUM_LEDS];
 
 Ticker display_ticker;
 
 PxMATRIX display(WIDTH, HEIGHT, P_LAT, P_OE, P_A, P_B, P_C, P_D);
-//PxMATRIX display(WIDTH, HEIGHT, P_LAT, P_OE, P_A, P_B, P_C, P_D, P_E);
 
 uint8_t display_draw_time=30; //10-50 is usually fine
-float isrDelay = 0.002;
+float isrDelay = 0.004;
 
 void display_updater() {
       display.display(display_draw_time);
@@ -142,69 +128,72 @@ time_t getNtpTime() {
   return DEFAULT_TIME; // return 0 if unable to get the time
 }
 
+#define TPM2NET_IN_PORT 65506
+#define TPM2NET_OUT_PORT 65442
+WiFiUDP udpTPM2;
+
+
+uint16_t myWHITE = display.color565(255, 255, 255);
+uint16_t myBLACK = display.color565(0, 0, 0);
+uint16_t myGREY = display.color565(188, 128, 128);
+uint16_t myPINK = display.color565(0, 128, 128);
+
+boolean otaStarted = false;
+
 void initOTA() {
   ArduinoOTA.setHostname("WemosMatrix32");
   ArduinoOTA.setPassword("wemos");
   ArduinoOTA.onStart([]() {
-     display.clearDisplay();
-    display.setFont();
-    display.showBuffer();
-  });
-  ArduinoOTA.onEnd([]() {});
-  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-    unsigned int realprogress = (progress / (total / 100));
-    char buffer[8];
-    sprintf(buffer, "%.2d %%", realprogress);
-    display.setCursor(2, 10);
+    display.setTextWrap(false);
+     display.setTextColor(myWHITE, myBLACK);
+   display.setFont();
+   display.clearDisplay();
+   otaStarted = true;
+   });
+  ArduinoOTA.onEnd([]() {
     display.clearDisplay();
-    display.print(buffer);
+   display.setCursor(2, 10);
+   display.print("100 %");
    display.showBuffer();
+    });
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+   display.clearDisplay();
+    unsigned int realprogress = (progress / (total / 100));
+    if (realprogress < 100) {
+    char buffer[6];
+    buffer[0] = ' ';
+    buffer[1] = (realprogress / 10) + '0';
+   buffer[2] = (realprogress % 10) + '0';
+   buffer[3] = ' ';
+   buffer[4] = '%';
+   buffer[5] = 0;
+     display.setCursor(2, 10);
+   display.print(buffer);
+   yield();
+   display.showBuffer();
+    }
   });
   ArduinoOTA.onError([](ota_error_t error) {});
   ArduinoOTA.begin();
 }
 
-ESP8266WebServer webServer(80);       // Create a webserver object that listens for HTTP request on port 80
+ESP8266WebServer webServer(80);     
+void sendOk(String text = "Ok") { webServer.send(200, "text/plain", text); }
 
-#if defined(USEFS)
-String fileList() {
-      String str = "";
-  Dir dir = FILESYSTEM.openDir("/");
-  while (dir.next()) {
-    str += dir.fileName();
-    str += " -> ";
-    str += dir.fileSize();
-    str += " b\r\n";
-  }
-  return str;
-}
-#endif
-
-void sendOk(String text = "Ok") {
-  webServer.send(200, "text/plain", text);
-}
 
 unsigned long lastFrameTime = 0;
 
-int backgroundMode = 1; // fire
-int timeMode = 1;
-unsigned long animLength = 20; // play each gif for 20 seconds
-
-
-uint16_t myWHITE = display.color565(255, 255, 255);
-uint16_t myBLACK = display.color565(0, 0, 0);
-uint16_t myGREY = display.color565(16, 16, 16);
-
+uint8_t backgroundMode = 1; // plasma
+boolean displayTime = true;
+boolean smallClock = false;
 
 void setup() {
   Serial.begin(115200);
-#if defined(USEFS)
-  FILESYSTEM.begin();
-#endif
-  display.begin(16);
+ display.begin(16);
   gif.begin(LITTLE_ENDIAN_PIXELS);
- display.setFastUpdate(true);
-   display.setBrightness(254);
+  // DONOTUSE, bad 16 and 32 lines...
+// display.setFastUpdate(true);
+ display.setBrightness(220);
   display_ticker.attach(isrDelay, display_updater);
 
   WiFiManager wifiManager;
@@ -218,183 +207,321 @@ void setup() {
 
  if (WiFi.isConnected()) {
     udpNTP.begin(NTP_PORT);
+    udpTPM2.begin(TPM2NET_IN_PORT);
     initOTA();
 
-   webServer.on("/intensity", HTTP_GET, []() {
-      String value = webServer.arg("value");
-      display.setBrightness(value.toInt());
-      sendOk();
-    });
-   webServer.on("/animlen", HTTP_GET, []() {
-      String value = webServer.arg("value");
-      animLength = value.toInt();
-      sendOk();
-    });
-   webServer.on("/bmode", HTTP_GET, []() {
-      String mode = webServer.arg("value");
-      backgroundMode = mode.toInt();
-      sendOk();
-    });
-    webServer.on("/tmode", HTTP_GET, []() {
-      String mode = webServer.arg("value");
-      timeMode = mode.toInt();
-      sendOk();
-    });
-    #if defined(USEFS)
-    webServer.on("/format", HTTP_GET, []() { boolean ret = FILESYSTEM.format(); sendOk(ret ? "Success" : "Failure"); });
-    webServer.on("/list", HTTP_GET, []() { sendOk(fileList()); });
-    #endif
+   webServer.on("/gif", HTTP_GET, []() { backgroundMode = 2; sendOk(); });
+   webServer.on("/black", HTTP_GET, []() { backgroundMode = 0; sendOk(); });
+   webServer.on("/grey", HTTP_GET, []() { backgroundMode = 5; sendOk(); });
+   webServer.on("/plasma", HTTP_GET, []() { backgroundMode = 1; sendOk(); });
+  webServer.on("/fire", HTTP_GET, []() { backgroundMode = 3; sendOk(); });
+ webServer.on("/tpm2", HTTP_GET, []() { backgroundMode = 4; sendOk(); });
+    webServer.on("/time", HTTP_GET, []() { displayTime = !displayTime; sendOk(); });
+   webServer.on("/clocksize", HTTP_GET, []() { smallClock = !smallClock; sendOk(); });
+  webServer.on("/info", HTTP_GET, []() { sendOk("gif\nblack\nplasma\nfire\ntpm2\ntime\nclocksize\n"); });
     webServer.begin();
+
     display.setFont();
     display.setCursor(0, 0);
     display.setTextColor(myWHITE);
     display.print(WiFi.localIP());
-    display.showBuffer();
-    delay(2000);
+     display.showBuffer();
+    delay(1000);
     setSyncInterval(3600);
    setSyncProvider(getNtpTime);
-    delay(4000);
   }
 }
 
 
 void printCenter(String str, int16_t y) {
-#if 0
-  int16_t  x1, y1;
-  uint16_t w, h;
-  display.getTextBounds(str, 0, 0, &x1, &y1, &w, &h);
-  display.setCursor(((WIDTH - w) / 2) - x1, y);
-#else
-int16_t x = 4;
-#if 1
+   display.setFont(&IBMPlexMono_Bold10pt7b);
+  int16_t x = 4;
   display.setTextColor(myWHITE);
  display.setCursor(x - 1, y);
   display.print(str);
-  yield();
+ yield();
  display.setCursor(x + 1, y);
   display.print(str);
-  yield();
+ yield();
  display.setCursor(x, y - 1);
   display.print(str);
-  yield();
-display.setCursor(x, y + 1);
+ display.setCursor(x, y + 1);
   display.print(str);
-#endif
-yield();
+  yield();
   display.setTextColor(myBLACK);
   display.setCursor(x, y);
   display.print(str);
-#endif
+ yield();
 }
 
-#if 1
-uint16_t XY(uint8_t x, uint8_t y) {
-  return y * WIDTH + x;
-}
-#else
-// alternate (zigzag)
-uint16_t XY(uint8_t x, uint8_t y) {
-  uint16_t i;
-  if( y & 0x01) {
-      // Odd rows run backwards
-      uint8_t reverseX = (WIDTH - 1) - x;
-      i = (y * WIDTH) + reverseX;
-    } else {
-      // Even rows run forwards
-      i = (y * WIDTH) + x;
-    }
-    return i;
-}
-#endif
-
-void displayFastLED(CRGB* colors) {
-    for (uint16_t y = 0; y < HEIGHT; ++y) {
-      yield();
-      for (uint16_t x = 0; x < WIDTH; ++x) {
-        CRGB& color = colors[XY(x, y)];
-        display.drawPixelRGB888(x, y, color.r, color.g, color.b);
-      }
-    }
+void printSmall(String str, int16_t x) {
+int16_t y = 2;
+  display.setFont(NULL);
+  display.setTextColor(myWHITE);
+ display.setCursor(x - 1, y);
+  display.print(str);
+ yield();
+ display.setCursor(x + 1, y);
+  display.print(str);
+yield();
+ display.setCursor(x, y - 1);
+  display.print(str);
+yield();
+display.setCursor(x, y + 1);
+  display.print(str);
+yield();
+  display.setTextColor(myBLACK);
+//  display.setTextColor(myPINK);
+  display.setCursor(x, y);
+ display.print(str);
+ yield();
 }
 
-void displayTime() {
- display.setFont(&IBMPlexMono_Bold10pt7b);
+boolean flasher = true;
+
+unsigned long lastTime = 0;
+
+void displayTime2() {
    display.setTextWrap(false);
-   display.setTextColor(myWHITE);
     time_t utc = now();
     time_t local = CE.toLocal(utc, &tcr);
-    char buffer[4];
-    sprintf(buffer, "%.2d", hour(local));
-    printCenter(buffer, 14);
-   sprintf(buffer, "%.2d", minute(local));     
-    printCenter(buffer, 30);
-}
-
-void setAutomaticBrightness() {
-  int br = 254;
-  time_t utc = now();
-    time_t local = CE.toLocal(utc, &tcr);
-    int h = hour(local);
-    if ((h >= 22) || (h <= 7)) {
-      br = 128;
+    char buffer[6];
+  uint8_t h = hour(local);
+  buffer[0] = (h / 10) + '0';
+  buffer[1] = (h  % 10) + '0';
+  buffer[2] = 0;
+    if (smallClock) {
+      printSmall(buffer, 2);
+    } else  {
+      printCenter(buffer, 14);
     }
-    display.setBrightness(br);
+  uint8_t m = minute(local); 
+   buffer[0] = (m / 10) + '0';
+   buffer[1] = (m  % 10) + '0';
+    buffer[2] = 0;
+     if (smallClock) {
+       if (millis() - lastTime >= 1000) {
+          lastTime = millis();
+          // query time here and blink
+          flasher = !flasher;
+       }
+        printSmall(flasher ? ":" : " ", display.getCursorX());
+        printSmall(buffer, display.getCursorX());
+     } else  {
+      printCenter(buffer, 30);
+    }
 }
 
+const int startevening = 20;
+const int endmorning = 8;
+
+const int hoursinday = 24;
+const uint8_t minbrightness = 128;
+const uint8_t maxbrightness = 220;
+
+uint8_t currentBrightness = maxbrightness; 
+void setBrightnessFromHour() {
+    uint8_t brightness = maxbrightness;
+    time_t local = CE.toLocal(now(), &tcr);
+    int hh = hour(local);
+    if (hh >= startevening) {
+      // distance from startevening
+      int d = hh - startevening;
+      // map distance to 
+      brightness = (uint8_t)map(d, 0, (hoursinday - startevening), maxbrightness, minbrightness);
+    } else if (hh <= 8) {
+      // distance fromm endsmorning
+      int d = endmorning - hh;
+      brightness = (uint8_t)map(d, 0, endmorning, maxbrightness, minbrightness);
+    }
+    if (currentBrightness != brightness) {
+      display.setBrightness(brightness);
+      currentBrightness = brightness;
+    }
+}
 
 uint16_t PlasmaTime = 0;
 uint16_t PlasmaShift = (random8(0, 5) * 32) + 64;
 
 #define PLASMA_X_FACTOR     24
 #define PLASMA_Y_FACTOR     24
-#define TARGET_FRAME_TIME   25  // Desired update rate, though if too many leds it will just run as fast as it can!
+#define TARGET_FRAME_TIME   20  // Desired update rate, though if too many leds it will just run as fast as it can!
 
 uint32_t  LoopDelayMS = TARGET_FRAME_TIME;
 uint32_t  LastLoop = millis() - LoopDelayMS;
 
-void backgroundSwirl() {
-  if ((millis() - LastLoop) >= LoopDelayMS) {
-    LastLoop = millis();
-    uint8_t blurAmount = beatsin8(2,10,255);
-    blur2d( colorsBACK, WIDTH, HEIGHT, blurAmount);
-   yield();
-    // Use two out-of-sync sine waves
-    uint8_t  i = beatsin8( 27, BORDER_WIDTH, HEIGHT-BORDER_WIDTH);
-    uint8_t  j = beatsin8( 41, BORDER_WIDTH, WIDTH-BORDER_WIDTH);
-    // Also calculate some reflections
-    uint8_t ni = (WIDTH-1)-i;
-    uint8_t nj = (WIDTH-1)-j;
-   yield();
-    // The color of each point shifts over time, each at a different speed.
-    uint16_t ms = millis();  
-    colorsBACK[XY( i, j)] += CHSV( ms / 11, 200, 255);
-    colorsBACK[XY( j, i)] += CHSV( ms / 13, 200, 255);
-    colorsBACK[XY(ni,nj)] += CHSV( ms / 17, 200, 255);
-    colorsBACK[XY(nj,ni)] += CHSV( ms / 29, 200, 255);
-    colorsBACK[XY( i,nj)] += CHSV( ms / 37, 200, 255);
-    colorsBACK[XY(ni, j)] += CHSV( ms / 41, 200, 255);
-  }
-}
+uint8_t defaultValue = 128;
 
 void backgroundPlasma2() {
-   if ((millis() - LastLoop) >= LoopDelayMS) {
-    LastLoop = millis();
-   // Fill background with dim plasma
+    // Fill background with dim plasma
     for (int16_t y = 0; y < HEIGHT; y++) {
+      yield();
      for (int16_t x = 0; x < WIDTH; x++) {
-        yield(); // secure time for the WiFi stack of ESP8266
-        int16_t r = sin16(PlasmaTime) / 256;
+         int16_t r = sin16(PlasmaTime) / 256;
         int16_t h = sin16(x * r * PLASMA_X_FACTOR + PlasmaTime) + 
                 cos16(y * (-r) * PLASMA_Y_FACTOR + PlasmaTime) +
                 sin16(y * x * (cos16(-PlasmaTime) / 256) / 2);
-        colorsBACK[XY(x, y)] = CHSV((uint8_t)((h / 256) + 128), 200, 200);
+        CRGB color = CHSV((uint8_t)((h / 256) + 128), 250, defaultValue);
+       display.drawPixelRGB888(x, y, color.r, color.g, color.b);
       }
     }
+  if ((millis() - LastLoop) >= LoopDelayMS) {
+    LastLoop = millis();
     uint16_t OldPlasmaTime = PlasmaTime;
     PlasmaTime += PlasmaShift;
     if (OldPlasmaTime > PlasmaTime)
       PlasmaShift = (random8(0, 5) * 32) + 64;
   }
+  yield();
+}
+
+static void GIFDraw(int x, int y, int w, int h, uint16_t* lBuf) {
+  // h == 1
+  for (int idx = 0; idx < w; ++idx) {
+    display.drawPixelRGB565(x + idx, y, lBuf[idx]);
+  }
+}
+
+#define DISPLAY_WIDTH 32
+
+// draws one line
+void GIFDraw(GIFDRAW *pDraw) {
+    uint8_t *s;
+    uint16_t *d, *usPalette, usTemp[DISPLAY_WIDTH]; // should be DISPLAY_WIDTH
+    int x, y, iWidth;
+
+    iWidth = pDraw->iWidth;
+    if (iWidth > DISPLAY_WIDTH)
+       iWidth = DISPLAY_WIDTH;
+    usPalette = pDraw->pPalette;
+    y = pDraw->iY + pDraw->y; // current line
+    
+    s = pDraw->pPixels;
+    if (pDraw->ucDisposalMethod == 2) { // restore to background color
+      for (x=0; x<iWidth; x++) {
+        if (s[x] == pDraw->ucTransparent)
+           s[x] = pDraw->ucBackground;
+      }
+      pDraw->ucHasTransparency = 0;
+    }
+    // Apply the new pixels to the main image
+    if (pDraw->ucHasTransparency) { // if transparency used 
+      uint8_t *pEnd, c, ucTransparent = pDraw->ucTransparent;
+      int x, iCount;
+      pEnd = s + iWidth;
+      x = 0;
+      iCount = 0; // count non-transparent pixels
+      while(x < iWidth) {
+        c = ucTransparent-1;
+        d = usTemp;
+        while (c != ucTransparent && s < pEnd) {
+          c = *s++;
+          if (c == ucTransparent) { // done, stop 
+            s--; // back up to treat it like transparent
+          }
+          else { // opaque 
+             *d++ = usPalette[c];
+             iCount++;
+          }
+        } // while looking for opaque pixels
+        if (iCount) { // any opaque pixels? 
+          GIFDraw( pDraw->iX + x, y, iCount, 1, (uint16_t*)usTemp);
+          x += iCount;
+          iCount = 0;
+        }
+        // no, look for a run of transparent pixels
+        c = ucTransparent;
+        while (c == ucTransparent && s < pEnd) {
+          c = *s++;
+          if (c == ucTransparent)
+             iCount++;
+          else
+             s--; 
+        }
+        if (iCount) {
+          x += iCount; // skip these
+          iCount = 0;
+        }
+      }
+    } else {
+      s = pDraw->pPixels;
+      // Translate the 8-bit pixels through the RGB565 palette (already byte reversed)
+      for (x=0; x<iWidth; x++)
+        usTemp[x] = usPalette[*s++];
+        GIFDraw( pDraw->iX, y, iWidth, 1, (uint16_t*)usTemp );
+    }
+}
+
+unsigned long backgroundMillis = 0;
+unsigned long animLength = 10; // play each gif for 10 seconds
+boolean imageLoaded = false;
+
+#define MAX_GIF_SIZE  2000
+unsigned char gifinmemory[MAX_GIF_SIZE];
+
+void loadNewImage2(const char* host, const char* rest) {
+    if (WiFi.isConnected()) {
+    WiFiClient wclient;
+    unsigned int size = -1;
+    if (wclient.connect(host, 80)) { 
+      wclient.print(String("GET ") + rest + " HTTP/1.1\r\n" + "Host: " + host + "\r\n" + "Connection: close\r\n\r\n");
+            while (wclient.connected() && !wclient.available());
+            while (wclient.connected()) {
+              String line = wclient.readStringUntil('\n');
+              // parse size
+              int headerSep = line.indexOf(':');
+              if (headerSep > 0) {
+                 String name = line.substring(0, headerSep);
+                String value = line.substring(headerSep + 1);
+                value.trim();
+                if (name.equalsIgnoreCase(F("Content-Length"))) {
+                   size = value.toInt();
+               } 
+              }
+//             Serial.println(line);
+              if (line == "\r") {
+                  break;
+              }
+          }
+ //         Serial.println("Read headers");
+          if (size < MAX_GIF_SIZE) {
+            int pos = 0;
+            char buffer[256];
+ //           Serial.println(String("Size expected: ") + size);
+            while ((pos < (size - 1))) {
+                int readbytes = wclient.read(buffer, 255);
+  //              Serial.print(String("Read: ") + readbytes);
+                 memcpy(gifinmemory + pos, buffer, readbytes);
+                 Serial.println(String("   Total: ") + pos);
+               pos += readbytes;
+             } 
+           gif.close();
+            imageLoaded = gif.open(gifinmemory, size, GIFDraw); 
+          } else {
+            imageLoaded = false;
+            }
+          wclient.stop();
+       } 
+   }
+}
+
+
+void playGIFFrame() {
+  if (imageLoaded) {
+    gif.playFrame(true, NULL);
+  } else {
+    // no image loaded
+  //fill_solid(colorsBACK, NUM_LEDS, CRGB::Red);
+  }
+}
+
+void backgroundGIF() {
+   if (((millis() - backgroundMillis) >= (animLength * 1000)) || !imageLoaded) { // load new image
+         backgroundMillis = millis();
+         display.clearDisplay();
+         loadNewImage2("merlinux.free.fr", "/gif32/gif2.php"); 
+   }
+   playGIFFrame();
 }
 
 const int rows = HEIGHT;
@@ -403,7 +530,7 @@ const int cols = WIDTH;
 const uint8_t flarerows = 4;    /* number of rows (from bottom) allowed to flare */
 const uint8_t maxflare = 2;     /* max number of simultaneous flares */
 const uint8_t flarechance = 25; /* chance (%) of a new flare (if there's room) */
-const uint8_t flaredecay = 18;  /* decay rate of flare radiation; 14 is good */
+const uint8_t flaredecay = 14;  /* decay rate of flare radiation; 14 is good */
 
 /* This is the map of colors from coolest (black) to hottest. Want blue flames? Go for it! */
 const uint32_t colors[] = {
@@ -482,12 +609,9 @@ void newflare() {
  *  call it frequently enough, the refresh rate may be lower than
  *  configured.
  */
-//unsigned long t = 0; /* keep time */
 void backgroundFire() {
   uint16_t i, j;
-//  if ( t > millis() ) return;
-//  t = millis() + (1000 / FPS);
-
+ 
   // First, move all existing heat points up the display and fade
   for ( i=rows-1; i>0; --i ) {
     yield();
@@ -529,251 +653,113 @@ void backgroundFire() {
   // Set and draw
   for ( i=0; i<rows; ++i ) {
     for ( j=0; j<cols; ++j ) {
-      colorsBACK[XY(j,rows - i - 1)] = colors[pix[i][j]];
+      // colorsBACK[XY(j,rows - i - 1)] = colors[pix[i][j]];
+      uint32_t color = colors[pix[i][j]];
+      uint8_t* bcolor = (uint8_t*)&color;
+      display.drawPixelRGB888(j, rows - i - 1, bcolor[2], bcolor[1], bcolor[0]);
     }
   }
  }
- 
 
-#if defined(USEFS)
-// Functions to access a file on the SD card
-fs::File myfile;
-#endif
+const uint16_t numleds = WIDTH * HEIGHT;
 
-void* gifOpen(char *filename, int32_t *size) {
-#if defined(USEFS) 
-  myfile = FILESYSTEM.open(filename, "r");
-  *size = myfile.size();
-  return &myfile;
-#else
-   *size = 0;
-   return 0;
-#endif
+const uint8_t packet_start_byte = 0x9c;
+const uint8_t packet_type_data = 0xda;
+const uint8_t packet_type_cmd = 0xc0;
+const uint8_t packet_type_response = 0xaa;
+const uint8_t packet_end_byte = 0x36;
+const uint8_t packet_response_ack = 0xac;
+
+// maximum udp esp8266 payload = 1460 -> 484 rgb leds per frame (22x22 matrix)
+// then you have to use packet numbers and split the payload
+const uint8_t rowsPerFrame = 8;
+const uint8_t frames = HEIGHT / rowsPerFrame;
+const uint16_t payload = WIDTH * rowsPerFrame * 3;
+const uint16_t expected_packet_size = payload + 7;
+
+//uint8_t data[payload];
+// reuse gif buffer
+uint8_t* data = gifinmemory;
+
+const void sendAck() {
+  udpTPM2.beginPacket(udpTPM2.remoteIP(), TPM2NET_OUT_PORT);
+  udpTPM2.write(&packet_response_ack, 1);
+  udpTPM2.endPacket();
 }
 
-void gifClose(void *handle) {
-#if defined(USEFS) 
-  if (myfile) myfile.close();
-#endif  
-}
+boolean showb = false;
 
-int32_t gifRead(GIFFILE *pFile, uint8_t *pBuf, int32_t iLen) {
-#if defined(USEFS) 
-    int32_t iBytesRead;
-    iBytesRead = iLen;
-    // Note: If you read a file all the way to the last byte, seek() stops working
-    if ((pFile->iSize - pFile->iPos) < iLen)
-       iBytesRead = pFile->iSize - pFile->iPos - 1; // <-- ugly work-around
-    if (iBytesRead <= 0)
-       return 0;
-    iBytesRead = (int32_t)myfile.read(pBuf, iBytesRead);
-    pFile->iPos = myfile.position();
-    return iBytesRead;
- #else
-  return 0;
- #endif
-} 
+ void backgroundTPM2() {
+  uint16_t packet_size = udpTPM2.parsePacket();
+  if (packet_size == 0) return;
+  if (showb) return;
+     // then parse to check
+  if (udpTPM2.read() != packet_start_byte) return;
+  // packet type
+  uint8_t ptype = udpTPM2.read();
+  uint16_t frame_size = (udpTPM2.read() << 8) | udpTPM2.read();
+  // skip packet number and number of packets
+  uint8_t packet = udpTPM2.read() - 1; //  starts at 1
+  uint8_t npackets = udpTPM2.read();
 
-int32_t gifSeek(GIFFILE *pFile, int32_t iPosition) { 
-#if defined(USEFS) 
-  myfile.seek(iPosition);
-  pFile->iPos = (int32_t)myfile.position();
-   return pFile->iPos;
-#else
-    return 0;
-#endif
-}
+  switch (ptype) {
+    case packet_type_response: sendAck(); break;
 
-static void GIFDraw(int x, int y, int w, int h, uint16_t* lBuf) {
-  // h == 1
-  for (int idx = 0; idx < w; ++idx) {
-    // convert uint16_t to 8 bit rgb
-    uint16_t color565 = lBuf[idx];
-    uint8_t r = ((((color565 >> 11) & 0x1F) * 527) + 23) >> 6;
-    uint8_t g = ((((color565 >> 5) & 0x3F) * 259) + 33) >> 6;
-    uint8_t b = (((color565 & 0x1F) * 527) + 23) >> 6;
-    colorsBACK[XY(x + idx, y)] = CRGB(r, g, b);
-  }
-}
+    case packet_type_data: {
+      if (frame_size != payload)
+        return;
+       Serial.println(String("Packet ") + packet + " / " + npackets + "(" + packet_size + ")");
 
-#define DISPLAY_WIDTH 32
-
-// draws one line
-void GIFDraw(GIFDRAW *pDraw) {
-    uint8_t *s;
-    uint16_t *d, *usPalette, usTemp[DISPLAY_WIDTH]; // should be DISPLAY_WIDTH
-    int x, y, iWidth;
-
-    iWidth = pDraw->iWidth;
-    if (iWidth > DISPLAY_WIDTH)
-       iWidth = DISPLAY_WIDTH;
-    usPalette = pDraw->pPalette;
-    y = pDraw->iY + pDraw->y; // current line
-    
-    s = pDraw->pPixels;
-    if (pDraw->ucDisposalMethod == 2) { // restore to background color
-      for (x=0; x<iWidth; x++) {
-        if (s[x] == pDraw->ucTransparent)
-           s[x] = pDraw->ucBackground;
-      }
-      pDraw->ucHasTransparency = 0;
-    }
-    // Apply the new pixels to the main image
-    if (pDraw->ucHasTransparency) { // if transparency used 
-      uint8_t *pEnd, c, ucTransparent = pDraw->ucTransparent;
-      int x, iCount;
-      pEnd = s + iWidth;
-      x = 0;
-      iCount = 0; // count non-transparent pixels
-      while(x < iWidth) {
-        c = ucTransparent-1;
-        d = usTemp;
-        while (c != ucTransparent && s < pEnd) {
-          c = *s++;
-          if (c == ucTransparent) { // done, stop 
-            s--; // back up to treat it like transparent
+      uint16_t offset = payload * packet;
+        udpTPM2.read(data, payload);
+        unsigned char* sdata = data;
+        // then write to offset in real display
+        for (uint8_t y = 0; y < rowsPerFrame; ++y) {
+          yield();
+          uint8_t starty = y + rowsPerFrame * packet;
+ //           Serial.println(String("Start y ") + starty);
+          for (uint8_t x = 0; x < WIDTH; ++x) {
+            yield();
+            uint8_t r = *sdata++;
+            uint8_t g = *sdata++;
+            uint8_t b = *sdata++;
+            display.drawPixelRGB888(x, starty, r, g, b);
           }
-          else { // opaque 
-             *d++ = usPalette[c];
-             iCount++;
-          }
-        } // while looking for opaque pixels
-        if (iCount) { // any opaque pixels? 
-          GIFDraw( pDraw->iX + x, y, iCount, 1, (uint16_t*)usTemp);
-          x += iCount;
-          iCount = 0;
-        }
-        // no, look for a run of transparent pixels
-        c = ucTransparent;
-        while (c == ucTransparent && s < pEnd) {
-          c = *s++;
-          if (c == ucTransparent)
-             iCount++;
-          else
-             s--; 
-        }
-        if (iCount) {
-          x += iCount; // skip these
-          iCount = 0;
-        }
-      }
-    } else {
-      s = pDraw->pPixels;
-      // Translate the 8-bit pixels through the RGB565 palette (already byte reversed)
-      for (x=0; x<iWidth; x++)
-        usTemp[x] = usPalette[*s++];
-        GIFDraw( pDraw->iX, y, iWidth, 1, (uint16_t*)usTemp );
-    }
-}
-
-boolean imageLoaded = false;
-
-void loadNewImage(const char* url) {
-  // create file from url
-  if (WiFi.isConnected()) {
-    WiFiClient wclient;
-    HTTPClient client;
-    if (client.begin(wclient, url)) {
-      if (client.GET() > 0) {
-        int len = client.getSize();
-//        Serial.printf("size: %d\n", len);
-        uint8_t buff[64] = { 0 }; 
-#if defined(USEFS)      
-        File file = FILESYSTEM.open("/image.gif", "w");
-        if (!file) {
-          Serial.println("There was an error opening the file for writing");
-          return;
         } 
-#endif
-        while (client.connected() && (len > 0 || len == -1)) {
-          // read up to 128 byte
-          int c = wclient.readBytes(buff, std::min((size_t)len, sizeof(buff))); 
- //          Serial.printf("readBytes: %d\n", c);
-          if (!c) {
- //           Serial.println("read timeout");
-          }
-#if defined(USEFS)
-          // write it to File
-          file.write(buff, c);
-#endif
-          if (len > 0) {
-            len -= c;
-          }  
-        }
-#if defined(USEFS)
-        file.close();
-#endif
-      }  
+        showb = packet == (npackets - 1); 
+       break;
     }
-    client.end();
-  }
-
-  // setup GIF reader
-  if (imageLoaded) 
-    gif.close();
-   imageLoaded = gif.open((char*)"/image.gif", gifOpen, gifClose, gifRead, gifSeek, GIFDraw);
+    case packet_type_cmd: break;
+    }
+  // skip end byte, maybe not neccessary
+  udpTPM2.read();
 }
 
-void playGIFFrame() {
-  if (imageLoaded) {
-    gif.playFrame(true, NULL);
-  } else {
-    // no image loaded
-    fill_solid(colorsBACK, NUM_LEDS, CRGB::HotPink);
-  }
-}
-
-unsigned long backgroundMillis = 0;
-
-void backgroundGIF() {
-   if ((millis() - backgroundMillis) >= (animLength * 1000)) { // load new image
-         backgroundMillis = millis();
-         loadNewImage("http://merlinux.free.fr/gif32/gif2.php");
-   }
-   playGIFFrame();
-}
-
+int prevMode = backgroundMode;
 
 void loop() {
    ArduinoOTA.handle();
    webServer.handleClient();
-   setAutomaticBrightness();
-   switch (backgroundMode) {
-    case 0: // blank
-      display.clearDisplay(); 
-      break;
-
-     case 1: // plasma
-        backgroundPlasma2();
-        displayFastLED(colorsBACK);
-        break;
-
-      case 2: // fastled anim
-         backgroundSwirl();
-        displayFastLED(colorsBACK);
-        break;
-
-      case 3: // GIF
-       backgroundGIF();
-       displayFastLED(colorsBACK);
-       break;
-
-       case 4: // uniform color
-       fill_solid(colorsBACK, NUM_LEDS, CRGB::HotPink);
-        displayFastLED(colorsBACK);
-        break;
-        
-        case 5: // fire
-        backgroundFire();
-         displayFastLED(colorsBACK);
-        break;
-        
-        default:
-         break;
+   if (!otaStarted) {
+    setBrightnessFromHour();
+     if (prevMode != backgroundMode) {
+     display.fillRect(0, 0, 32, 32, myBLACK);
+      prevMode = backgroundMode;
+     }
+      switch (backgroundMode) {
+       case 1: backgroundPlasma2(); break;
+       case 2: backgroundGIF(); break;
+       case 3: backgroundFire(); break;
+       case 4: backgroundTPM2(); break;
+       case 5: display.fillRect(0, 0, 32, 32, myGREY); break;
+      default: display.fillRect(0, 0, 32, 32, myBLACK); break;
+     }
+     if (displayTime) 
+        displayTime2();
+      if ((backgroundMode != 4) || showb) {
+        display.showBuffer();
+        if (backgroundMode == 4) showb = false;
       }
-      yield();
-   if (timeMode == 1) 
-      displayTime();
-    display.showBuffer();
-   delay(1);
+   }
+    yield();
 }
