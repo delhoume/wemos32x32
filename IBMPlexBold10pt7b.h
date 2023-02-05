@@ -225,5 +225,3 @@ const GFXfont IBMPlexMono_Bold10pt7b PROGMEM = {
   (uint8_t  *)IBMPlexMono_Bold10pt7bBitmaps,
   (GFXglyph *)IBMPlexMono_Bold10pt7bGlyphs,
   0x20, 0x7E, 25 };
-
-// Approx. 2152 bytes
