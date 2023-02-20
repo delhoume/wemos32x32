@@ -141,7 +141,7 @@ uint16_t myPINK = display.color565(0, 128, 128);
 boolean otaStarted = false;
 
 void initOTA() {
-  ArduinoOTA.setHostname("WemosMatrix32");
+  ArduinoOTA.setHostname("Wemos32x32");
   ArduinoOTA.setPassword("wemos");
   ArduinoOTA.onStart([]() {
     display.setTextWrap(false);
@@ -354,13 +354,13 @@ uint8_t defaultValue = 128;
 
 void backgroundPlasma2() {
     // Fill background with dim plasma
-    for (int16_t y = 0; y < HEIGHT; y++) {
+  int16_t r = sin16(PlasmaTime) / 256;
+  int16_t rr = cos16(-PlasmaTime) / 512;
+  for (int16_t y = 0; y < HEIGHT; y++) {
       yield();
+      int16_t ry = cos16(y * (-r) * PLASMA_Y_FACTOR + PlasmaTime);
      for (int16_t x = 0; x < WIDTH; x++) {
-         int16_t r = sin16(PlasmaTime) / 256;
-        int16_t h = sin16(x * r * PLASMA_X_FACTOR + PlasmaTime) + 
-                cos16(y * (-r) * PLASMA_Y_FACTOR + PlasmaTime) +
-                sin16(y * x * (cos16(-PlasmaTime) / 256) / 2);
+          int16_t h = sin16(x * r * PLASMA_X_FACTOR + PlasmaTime) + ry + sin16(y * x * rr);
         CRGB color = CHSV((uint8_t)((h / 256) + 128), 250, defaultValue);
        display.drawPixelRGB888(x, y, color.r, color.g, color.b);
       }
@@ -464,8 +464,10 @@ void loadNewImage2(const char* host, const char* rest) {
     WiFiClient wclient;
     unsigned int size = -1;
     if (wclient.connect(host, 80)) { 
-      wclient.print(String("GET ") + rest + " HTTP/1.1\r\n" + "Host: " + host + "\r\n" + "Connection: close\r\n\r\n");
-            while (wclient.connected() && !wclient.available());
+      wclient.print(String(F("GET ")) + rest + " HTTP/1.1\r\n" + "Host: " + host + "\r\n" + "Connection: close\r\n\r\n");
+            while (wclient.connected() && !wclient.available()) {
+              delay(10);
+            }
             while (wclient.connected()) {
               String line = wclient.readStringUntil('\n');
               // parse size
@@ -492,7 +494,7 @@ void loadNewImage2(const char* host, const char* rest) {
                 int readbytes = wclient.read(buffer, 255);
   //              Serial.print(String("Read: ") + readbytes);
                  memcpy(gifinmemory + pos, buffer, readbytes);
-                 Serial.println(String("   Total: ") + pos);
+                 Serial.println(String(F("   Total: ")) + pos);
                pos += readbytes;
              } 
            gif.close();
@@ -708,7 +710,7 @@ boolean showb = false;
     case packet_type_data: {
       if (frame_size != payload)
         return;
-       Serial.println(String("Packet ") + packet + " / " + npackets + "(" + packet_size + ")");
+       Serial.println(String(F("Packet ")) + packet + " / " + npackets + "(" + packet_size + ")");
 
       uint16_t offset = payload * packet;
         udpTPM2.read(data, payload);
