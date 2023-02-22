@@ -105,7 +105,7 @@ time_t getNtpTime() {
   if (WiFi.isConnected()) {
     IPAddress timeServerIP; // time.nist.gov NTP server address
     WiFi.hostByName(ntpServerName, timeServerIP);
-    while (udpNTP.parsePacket() > 0) ; // discard any previously received packets
+    while (udpNTP.parsePacket() > 0) delay(5); // discard any previously received packets
     sendNTPpacket(timeServerIP);
     uint32_t beginWait = millis();
     while (millis() - beginWait < 1500) {
