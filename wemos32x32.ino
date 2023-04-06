@@ -4,8 +4,13 @@
 #include <WiFiUdp.h>
 #include <FastLED.h>
 
+#define ARDUINOTRACE_ENABLE 0  // Disable all traces
+#include <ArduinoTrace.h>
+
 #define double_buffer
 #define PxMATRIX_COLOR_DEPTH 4
+#define PxMATRIX_MAX_WIDTH 32
+#define PxMATRIX_MAX_HEIGHT 32
 #include <PxMatrix.h>
 
 #include "IBMPlexBold10pt7b.h"
@@ -19,7 +24,7 @@
 #define LOCK_VERSION       2
 //#include <qrcode.h>
 
-#include "AnimatedGIF.h"
+#include <AnimatedGIF.h>
 
 AnimatedGIF gif;
 
@@ -45,7 +50,7 @@ Ticker display_ticker;
 
 PxMATRIX display(WIDTH, HEIGHT, P_LAT, P_OE, P_A, P_B, P_C, P_D);
 
-uint8_t display_draw_time=30; //10-50 is usually fine
+uint8_t display_draw_time=25; //10-50 is usually fine
 float isrDelay = 0.004;
 
 void display_updater() {
@@ -111,7 +116,6 @@ time_t getNtpTime() {
     while (millis() - beginWait < 1500) {
       int size = udpNTP.parsePacket();
       if (size >= NTP_PACKET_SIZE) {
- //       Serial.println("Receive NTP Response");
         byte packetBuffer[ NTP_PACKET_SIZE];
         udpNTP.read(packetBuffer, NTP_PACKET_SIZE);  // read packet into the buffer
         unsigned long secsSince1900;
@@ -124,7 +128,6 @@ time_t getNtpTime() {
       }
     }
   }
-//  Serial.println("No NTP Response :-(");
   return DEFAULT_TIME; // return 0 if unable to get the time
 }
 
@@ -187,6 +190,8 @@ uint8_t backgroundMode = 1; // plasma
 boolean displayTime = true;
 boolean smallClock = false;
 
+int gifsize;
+
 void setup() {
   Serial.begin(115200);
  display.begin(16);
@@ -200,7 +205,7 @@ void setup() {
   // wifiManager.resetSettings();
   // TODO: increase in production
   wifiManager.setConfigPortalTimeout(60);
-  wifiManager.setDebugOutput(true);
+//  wifiManager.setDebugOutput(true);
   wifiManager.setAPCallback(configModeCallback);
   wifiManager.setMinimumSignalQuality(20);
   wifiManager.autoConnect(ACCESS_POINT);
@@ -218,7 +223,8 @@ void setup() {
  webServer.on("/tpm2", HTTP_GET, []() { backgroundMode = 4; sendOk(); });
     webServer.on("/time", HTTP_GET, []() { displayTime = !displayTime; sendOk(); });
    webServer.on("/clocksize", HTTP_GET, []() { smallClock = !smallClock; sendOk(); });
-  webServer.on("/info", HTTP_GET, []() { sendOk("gif\nblack\nplasma\nfire\ntpm2\ntime\nclocksize\n"); });
+  webServer.on("/info", HTTP_GET, []() { sendOk(F("gif\nblack\nplasma\nfire\ntpm2\ntime\nclocksize\n")); });
+  webServer.on("/ginfo", HTTP_GET, []() { sendOk(String(gifsize) + " reset reason: " + ESP.getResetReason() + " freeheap: " + ESP.getFreeHeap()); });
     webServer.begin();
 
     display.setFont();
@@ -356,13 +362,15 @@ void backgroundPlasma2() {
     // Fill background with dim plasma
   int16_t r = sin16(PlasmaTime) / 256;
   int16_t rr = cos16(-PlasmaTime) / 512;
+  CRGB color;
   for (int16_t y = 0; y < HEIGHT; y++) {
-      yield();
       int16_t ry = cos16(y * (-r) * PLASMA_Y_FACTOR + PlasmaTime);
+      int16_t rry = y * rr;
      for (int16_t x = 0; x < WIDTH; x++) {
-          int16_t h = sin16(x * r * PLASMA_X_FACTOR + PlasmaTime) + ry + sin16(y * x * rr);
-        CRGB color = CHSV((uint8_t)((h / 256) + 128), 250, defaultValue);
+          int16_t h = sin16(x * r * PLASMA_X_FACTOR + PlasmaTime) + ry + sin16(x * rry);
+        color = CHSV((uint8_t)((h / 256) + 128), 250, defaultValue);
        display.drawPixelRGB888(x, y, color.r, color.g, color.b);
+       yield();
       }
     }
   if ((millis() - LastLoop) >= LoopDelayMS) {
@@ -375,27 +383,31 @@ void backgroundPlasma2() {
   yield();
 }
 
-static void GIFDraw(int x, int y, int w, int h, uint16_t* lBuf) {
-  // h == 1
-  for (int idx = 0; idx < w; ++idx) {
-    display.drawPixelRGB565(x + idx, y, lBuf[idx]);
-  }
-}
-
 #define DISPLAY_WIDTH 32
+#define DISPLAY_HEIGHT 32
+
+uint16_t gifbuffer[DISPLAY_WIDTH * DISPLAY_HEIGHT];
+
+static void GIFDraw(int x, int y, int w, int h, uint16_t* lBuf) {
+   // h == 1, really ?
+  memcpy(gifbuffer + y * DISPLAY_WIDTH + x, lBuf, w * sizeof(uint16_t));
+ // for (int idx = 0; idx < w; ++idx) { display.drawPixelRGB565(x + idx, y, lBuf[idx]); }
+ yield();
+}
 
 // draws one line
 void GIFDraw(GIFDRAW *pDraw) {
     uint8_t *s;
-    uint16_t *d, *usPalette, usTemp[DISPLAY_WIDTH]; // should be DISPLAY_WIDTH
+    uint16_t *d, *usPalette, usTemp[DISPLAY_WIDTH]; 
     int x, y, iWidth;
 
-    iWidth = pDraw->iWidth;
-    if (iWidth > DISPLAY_WIDTH)
-       iWidth = DISPLAY_WIDTH;
+    iWidth = pDraw->iWidth; 
+    if (iWidth + pDraw->iX > DISPLAY_WIDTH)
+       iWidth = DISPLAY_WIDTH - pDraw->iX;
     usPalette = pDraw->pPalette;
     y = pDraw->iY + pDraw->y; // current line
-    
+    if (y >= DISPLAY_HEIGHT || pDraw->iX >= DISPLAY_WIDTH || iWidth < 1)
+       return; 
     s = pDraw->pPixels;
     if (pDraw->ucDisposalMethod == 2) { // restore to background color
       for (x=0; x<iWidth; x++) {
@@ -456,19 +468,21 @@ unsigned long backgroundMillis = 0;
 unsigned long animLength = 10; // play each gif for 10 seconds
 boolean imageLoaded = false;
 
-#define MAX_GIF_SIZE  2000
+#define MAX_GIF_SIZE  2048
 unsigned char gifinmemory[MAX_GIF_SIZE];
 
+WiFiClient wclient;
+
 void loadNewImage2(const char* host, const char* rest) {
+  imageLoaded = false;
     if (WiFi.isConnected()) {
-    WiFiClient wclient;
-    unsigned int size = -1;
-    if (wclient.connect(host, 80)) { 
-      wclient.print(String(F("GET ")) + rest + " HTTP/1.1\r\n" + "Host: " + host + "\r\n" + "Connection: close\r\n\r\n");
+    gifsize = -1;
+     if (wclient.connect(host, 80)) { 
+      wclient.print(String(F("GET ")) + rest + F(" HTTP/1.1\r\nHost: ") + host + F("\r\nConnection: close\r\n\r\n"));
             while (wclient.connected() && !wclient.available()) {
-              delay(10);
+              delay(5);
             }
-            while (wclient.connected()) {
+           while (wclient.connected()) {
               String line = wclient.readStringUntil('\n');
               // parse size
               int headerSep = line.indexOf(':');
@@ -477,52 +491,64 @@ void loadNewImage2(const char* host, const char* rest) {
                 String value = line.substring(headerSep + 1);
                 value.trim();
                 if (name.equalsIgnoreCase(F("Content-Length"))) {
-                   size = value.toInt();
+                   gifsize = value.toInt();
                } 
               }
-//             Serial.println(line);
+              TRACE();
               if (line == "\r") {
                   break;
               }
           }
- //         Serial.println("Read headers");
-          if (size < MAX_GIF_SIZE) {
+           TRACE();
+          if (gifsize < MAX_GIF_SIZE) {
             int pos = 0;
-            char buffer[256];
- //           Serial.println(String("Size expected: ") + size);
-            while ((pos < (size - 1))) {
-                int readbytes = wclient.read(buffer, 255);
-  //              Serial.print(String("Read: ") + readbytes);
-                 memcpy(gifinmemory + pos, buffer, readbytes);
-                 Serial.println(String(F("   Total: ")) + pos);
-               pos += readbytes;
-             } 
-           gif.close();
-            imageLoaded = gif.open(gifinmemory, size, GIFDraw); 
-          } else {
-            imageLoaded = false;
-            }
-          wclient.stop();
+            static char buffer[128];
+            DUMP(size);
+//            memset(gifinmemory, 0, MAX_GIF_SIZE - 1);
+             while (wclient.available()) {
+               yield();
+                int readbytes = wclient.read(buffer, 128);
+                DUMP(readbytes);
+                if ((pos + readbytes) < MAX_GIF_SIZE) {
+                  memcpy(gifinmemory + pos, buffer, readbytes);
+                  pos += readbytes;
+                  DUMP(pos);
+                } 
+                gif.close();
+                imageLoaded = gif.open(gifinmemory, pos, GIFDraw); 
+             }
+          }
        } 
    }
 }
 
 
 void playGIFFrame() {
-  if (imageLoaded) {
+  if (imageLoaded && (gif.getCanvasWidth() == DISPLAY_WIDTH) && (gif.getCanvasHeight() == DISPLAY_HEIGHT)) {
     gif.playFrame(true, NULL);
+    // copy buffer to screen at once and keep it 
+    uint16_t pos = 0;
+    for (uint8_t y = 0; y < DISPLAY_HEIGHT; ++y) {
+      yield();
+      for (uint8_t x = 0; x < DISPLAY_WIDTH; ++x, ++pos) {
+        display.drawPixelRGB565(x, y, gifbuffer[pos]);
+      }
+    }
   } else {
     // no image loaded
-  //fill_solid(colorsBACK, NUM_LEDS, CRGB::Red);
+    display.fillScreen(myBLACK);
+    delay(5);
   }
 }
 
 void backgroundGIF() {
    if (((millis() - backgroundMillis) >= (animLength * 1000)) || !imageLoaded) { // load new image
-         backgroundMillis = millis();
-         display.clearDisplay();
+   //        display.clearDisplay();
          loadNewImage2("merlinux.free.fr", "/gif32/gif2.php"); 
-   }
+ // venom ok
+//        loadNewImage2("merlinux.free.fr", "/gif32/Sonic%20P_%20Run%20Sega%20Speed.gif"); 
+    backgroundMillis = millis();
+  }
    playGIFFrame();
 }
 
@@ -710,7 +736,8 @@ boolean showb = false;
     case packet_type_data: {
       if (frame_size != payload)
         return;
-       Serial.println(String(F("Packet ")) + packet + " / " + npackets + "(" + packet_size + ")");
+       DUMP(packet);
+       DUMP(packet_size);
 
       uint16_t offset = payload * packet;
         udpTPM2.read(data, payload);
@@ -719,9 +746,9 @@ boolean showb = false;
         for (uint8_t y = 0; y < rowsPerFrame; ++y) {
           yield();
           uint8_t starty = y + rowsPerFrame * packet;
- //           Serial.println(String("Start y ") + starty);
+          DUMP(starty);
           for (uint8_t x = 0; x < WIDTH; ++x) {
-            yield();
+//            yield();
             uint8_t r = *sdata++;
             uint8_t g = *sdata++;
             uint8_t b = *sdata++;
@@ -745,7 +772,7 @@ void loop() {
    if (!otaStarted) {
     setBrightnessFromHour();
      if (prevMode != backgroundMode) {
-     display.fillRect(0, 0, 32, 32, myBLACK);
+     display.fillScreen(myBLACK);
       prevMode = backgroundMode;
      }
       switch (backgroundMode) {
@@ -753,8 +780,8 @@ void loop() {
        case 2: backgroundGIF(); break;
        case 3: backgroundFire(); break;
        case 4: backgroundTPM2(); break;
-       case 5: display.fillRect(0, 0, 32, 32, myGREY); break;
-      default: display.fillRect(0, 0, 32, 32, myBLACK); break;
+       case 5: display.fillScreen(myGREY); break;
+      default: display.fillScreen(myBLACK); break;
      }
      if (displayTime) 
         displayTime2();
